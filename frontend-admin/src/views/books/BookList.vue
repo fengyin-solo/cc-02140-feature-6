@@ -43,12 +43,44 @@
           </a-select>
         </a-col>
         <a-col :xs="24" :sm="24" :md="8" :lg="12" style="text-align: right;">
-          <a-button type="primary" @click="showAddModal" class="add-btn">
-            <PlusOutlined /> 新增图书
-          </a-button>
+          <a-space>
+            <a-button
+              :disabled="selectedRowKeys.length === 0"
+              class="batch-btn"
+              @click="showBatchModal"
+            >
+              <UnorderedListOutlined /> 批量维护
+              <a-badge
+                v-if="selectedRowKeys.length > 0"
+                :count="selectedRowKeys.length"
+                :number-style="{ backgroundColor: '#1890ff' }"
+                style="margin-left: 4px"
+              />
+            </a-button>
+            <a-button type="primary" @click="showAddModal" class="add-btn">
+              <PlusOutlined /> 新增图书
+            </a-button>
+          </a-space>
         </a-col>
       </a-row>
-      
+
+      <!-- 多选操作条 -->
+      <transition name="fade-slide">
+        <div v-if="selectedRowKeys.length > 0" class="batch-tip">
+          <span class="selected-count">
+            已选择 <strong>{{ selectedRowKeys.length }}</strong> 本图书
+          </span>
+          <a-space>
+            <a-button type="primary" size="small" @click="showBatchModal">
+              <UnorderedListOutlined /> 批量维护分类 / 库存 / 存放位置
+            </a-button>
+            <a-button type="link" size="small" class="clear-btn" @click="clearSelection">
+              取消选择
+            </a-button>
+          </a-space>
+        </div>
+      </transition>
+
       <!-- 搜索结果提示 -->
       <transition name="fade-slide">
         <div v-if="searchKeyword || selectedCategory" class="search-result-tip">
@@ -79,6 +111,7 @@
         :data-source="filteredBooks"
         :loading="loading"
         row-key="id"
+        :row-selection="{ selectedRowKeys, onChange: onSelectionChange }"
         :pagination="{ pageSize: 10, showTotal: total => `共 ${total} 条` }"
         :row-class-name="getRowClassName"
         @change="handleTableChange"
@@ -115,7 +148,10 @@
             </div>
           </template>
           <template v-else-if="column.key === 'action'">
-            <a-space>
+            <a-space :size="2">
+              <a-button type="link" size="small" class="table-action-btn detail-btn" @click="showDetailDrawer(record)">
+                <EyeOutlined /> 详情
+              </a-button>
               <a-button type="link" size="small" class="table-action-btn edit-btn" @click="showEditModal(record)">
                 <EditOutlined /> 编辑
               </a-button>
@@ -200,13 +236,152 @@
         </a-form-item>
       </a-form>
     </a-modal>
+
+    <!-- 批量维护弹窗 -->
+    <a-modal
+      v-model:open="batchModalVisible"
+      title="批量维护图书"
+      width="860px"
+      :mask-closable="false"
+      :confirm-loading="batchSubmitting"
+      :ok-text="batchFailure.length > 0 ? `重试失败项（${batchFailure.length}）` : '提交批量更新'"
+      cancel-text="关闭"
+      @ok="handleBatchSubmit"
+      @cancel="handleBatchClose"
+    >
+      <a-alert
+        type="info"
+        show-icon
+        style="margin-bottom: 16px"
+        message="勾选需要统一更新的字段并填写新值，未勾选的字段保持不变；将逐条返回每本图书的处理结果。"
+      />
+
+      <!-- 统一更新字段 -->
+      <a-form layout="inline" class="batch-fields">
+        <a-form-item>
+          <a-checkbox v-model:checked="batchForm.updateCategory">统一分类</a-checkbox>
+          <a-select
+            v-model:value="batchForm.categoryId"
+            :disabled="!batchForm.updateCategory"
+            placeholder="选择分类"
+            style="width: 150px"
+          >
+            <a-select-option
+              v-for="cat in categoryStore.categories"
+              :key="cat.id"
+              :value="cat.id"
+            >
+              {{ cat.name }}
+            </a-select-option>
+          </a-select>
+        </a-form-item>
+        <a-form-item>
+          <a-checkbox v-model:checked="batchForm.updateStock">统一库存</a-checkbox>
+          <a-input-number
+            v-model:value="batchForm.total"
+            :disabled="!batchForm.updateStock"
+            :min="0"
+            :precision="0"
+            placeholder="总库存"
+            style="width: 130px"
+          />
+        </a-form-item>
+        <a-form-item>
+          <a-checkbox v-model:checked="batchForm.updateLocation">统一位置</a-checkbox>
+          <a-input
+            v-model:value="batchForm.location"
+            :disabled="!batchForm.updateLocation"
+            placeholder="如：A区-01-03"
+            style="width: 170px"
+          />
+        </a-form-item>
+      </a-form>
+
+      <!-- 待处理图书列表（失败项保留，成功项移除） -->
+      <div class="batch-list-header">
+        <span>待处理图书（{{ batchPendingBooks.length }} 本）</span>
+        <span class="batch-list-hint">正在借阅的图书库存不能低于在借数量</span>
+      </div>
+      <a-table
+        :columns="batchColumns"
+        :data-source="batchPendingBooks"
+        :pagination="false"
+        row-key="id"
+        size="small"
+        :scroll="{ y: 240 }"
+      >
+        <template #bodyCell="{ column, record }">
+          <template v-if="column.key === 'stock'">
+            <span>{{ record.available }} / {{ record.total }}</span>
+            <a-tag v-if="getBorrowedCount(record.id) > 0" color="orange" style="margin-left: 6px">
+              在借 {{ getBorrowedCount(record.id) }}
+            </a-tag>
+          </template>
+        </template>
+      </a-table>
+
+      <!-- 逐条处理结果 -->
+      <div v-if="batchResults.length > 0" class="batch-result">
+        <div class="batch-result-summary">
+          <a-tag color="success">成功 {{ batchSuccess.length }}</a-tag>
+          <a-tag v-if="batchFailure.length > 0" color="error">失败 {{ batchFailure.length }}</a-tag>
+          <span v-if="batchFailure.length > 0" class="batch-retry-hint">
+            失败项已保留在待处理列表，调整后可直接重试
+          </span>
+        </div>
+        <div class="batch-result-list">
+          <div
+            v-for="item in batchResults"
+            :key="item.id"
+            :class="['batch-result-item', item.success ? 'is-success' : 'is-fail']"
+          >
+            <span class="batch-result-icon">
+              <CheckCircleFilled v-if="item.success" />
+              <CloseCircleFilled v-else />
+            </span>
+            <span class="batch-result-title">{{ item.title || `#${item.id}` }}</span>
+            <span class="batch-result-msg">
+              {{ item.success ? '更新成功' : item.reason }}
+            </span>
+          </div>
+        </div>
+      </div>
+    </a-modal>
+
+    <!-- 图书详情抽屉 -->
+    <a-drawer
+      v-model:open="detailVisible"
+      title="图书详情"
+      width="420px"
+      @close="detailVisible = false"
+    >
+      <template v-if="detailBook">
+        <div class="detail-cover">
+          <img :src="detailBook.cover" :alt="detailBook.title" />
+        </div>
+        <a-descriptions :column="1" bordered size="small" class="detail-desc">
+          <a-descriptions-item label="书名">{{ detailBook.title }}</a-descriptions-item>
+          <a-descriptions-item label="ISBN">{{ detailBook.isbn }}</a-descriptions-item>
+          <a-descriptions-item label="作者">{{ detailBook.author }}</a-descriptions-item>
+          <a-descriptions-item label="出版社">{{ detailBook.publisher }}</a-descriptions-item>
+          <a-descriptions-item label="分类">{{ detailBook.categoryName }}</a-descriptions-item>
+          <a-descriptions-item label="价格">￥{{ detailBook.price }}</a-descriptions-item>
+          <a-descriptions-item label="库存">
+            总库存 {{ detailBook.total }}，可借 {{ detailBook.available }}
+            <a-tag color="orange" style="margin-left: 6px">在借 {{ getBorrowedCount(detailBook.id) }}</a-tag>
+          </a-descriptions-item>
+          <a-descriptions-item label="存放位置">{{ detailBook.location || '-' }}</a-descriptions-item>
+          <a-descriptions-item label="简介">{{ detailBook.description || '-' }}</a-descriptions-item>
+        </a-descriptions>
+      </template>
+    </a-drawer>
   </div>
 </template>
 
 <script setup>
 import { ref, reactive, computed, nextTick, watch } from 'vue'
 import { message } from 'ant-design-vue'
-import { PlusOutlined, EditOutlined, DeleteOutlined, SearchOutlined, EyeOutlined } from '@ant-design/icons-vue'
+import { PlusOutlined, EditOutlined, DeleteOutlined, SearchOutlined, EyeOutlined, UnorderedListOutlined, CheckCircleFilled, CloseCircleFilled } from '@ant-design/icons-vue'
 import { useBookStore } from '@/stores/book'
 import { useCategoryStore } from '@/stores/category'
 
@@ -225,6 +400,158 @@ const isSearching = ref(false)
 const tableAnimating = ref(false)
 let searchTimeout = null
 
+// ========================================
+// 多选 & 批量维护
+// ========================================
+const selectedRowKeys = ref([])
+
+const batchModalVisible = ref(false)
+const batchSubmitting = ref(false)
+// 待处理图书 id：失败项保留，成功项移除
+const batchPendingIds = ref([])
+// 最近一次逐条结果（用于在弹窗中对照查看）
+const batchResults = ref([])
+
+const batchForm = reactive({
+  updateCategory: false,
+  categoryId: null,
+  updateStock: false,
+  total: null,
+  updateLocation: false,
+  location: ''
+})
+
+const batchColumns = [
+  { title: '图书', dataIndex: 'title', key: 'title', ellipsis: true },
+  { title: '分类', dataIndex: 'categoryName', key: 'category', width: 110 },
+  { title: '可借/总库存', key: 'stock', width: 150 },
+  { title: '存放位置', dataIndex: 'location', key: 'location', width: 120 }
+]
+
+// 列表刷新/筛选后，待处理项依然与当前图书数据对得上
+const batchPendingBooks = computed(() =>
+  batchPendingIds.value
+    .map(id => bookStore.getBookById(id))
+    .filter(Boolean)
+)
+
+const batchSuccess = computed(() => batchResults.value.filter(item => item.success))
+const batchFailure = computed(() => batchResults.value.filter(item => !item.success))
+
+function getBorrowedCount(bookId) {
+  return bookStore.getBorrowedCount(bookId)
+}
+
+// 表格多选（选择变化时同步清理已不存在的选中项）
+function onSelectionChange(keys) {
+  selectedRowKeys.value = keys
+}
+
+function clearSelection() {
+  selectedRowKeys.value = []
+}
+
+function showBatchModal() {
+  // 空选择不进入批量维护
+  if (selectedRowKeys.value.length === 0) {
+    message.warning('请先勾选需要批量维护的图书')
+    return
+  }
+  // 过滤掉已被删除的图书，保留有效待处理项
+  batchPendingIds.value = [...new Set(selectedRowKeys.value)]
+    .filter(id => bookStore.getBookById(id))
+  batchResults.value = []
+  Object.assign(batchForm, {
+    updateCategory: false,
+    categoryId: null,
+    updateStock: false,
+    total: null,
+    updateLocation: false,
+    location: ''
+  })
+  batchModalVisible.value = true
+}
+
+async function handleBatchSubmit() {
+  // 重复提交防护
+  if (batchSubmitting.value) return
+
+  // 待处理项为空时不执行
+  if (batchPendingBooks.value.length === 0) {
+    message.warning('待处理列表为空，没有可更新的图书')
+    return
+  }
+
+  // 至少勾选一个要更新的字段
+  if (!batchForm.updateCategory && !batchForm.updateStock && !batchForm.updateLocation) {
+    message.warning('请至少勾选一个需要统一更新的字段（分类 / 库存 / 存放位置）')
+    return
+  }
+  if (batchForm.updateCategory && !batchForm.categoryId) {
+    message.warning('请选择需要统一设置的分类')
+    return
+  }
+  if (batchForm.updateStock && (batchForm.total === null || batchForm.total === undefined)) {
+    message.warning('请填写需要统一设置的库存数量')
+    return
+  }
+  if (batchForm.updateLocation && !String(batchForm.location).trim()) {
+    message.warning('请填写需要统一设置的存放位置')
+    return
+  }
+
+  batchSubmitting.value = true
+  await new Promise(resolve => setTimeout(resolve, 400))
+
+  const updates = {}
+  if (batchForm.updateCategory) updates.categoryId = batchForm.categoryId
+  if (batchForm.updateStock) updates.total = batchForm.total
+  if (batchForm.updateLocation) updates.location = batchForm.location
+
+  // 逐条校验、逐条更新，返回成功与失败原因
+  const { success, failure, results } = bookStore.batchUpdateBooks(
+    batchPendingIds.value,
+    updates
+  )
+  batchResults.value = results
+
+  // 成功项移出待处理列表，失败项保留以便调整后重试
+  batchPendingIds.value = failure.map(item => item.id)
+
+  if (failure.length === 0) {
+    message.success(`批量更新完成，共成功 ${success.length} 本`)
+  } else if (success.length > 0) {
+    message.warning(`成功 ${success.length} 本，失败 ${failure.length} 本，失败项已保留`)
+  } else {
+    message.error(`全部 ${failure.length} 本均处理失败，请根据失败原因调整后重试`)
+  }
+
+  batchSubmitting.value = false
+}
+
+function handleBatchClose() {
+  // 仍有保留的待处理项时，同步勾选状态，方便重新打开继续处理
+  if (batchPendingIds.value.length > 0) {
+    selectedRowKeys.value = [...new Set([...selectedRowKeys.value])]
+      .filter(id => batchPendingIds.value.includes(id) && bookStore.getBookById(id))
+  }
+  batchModalVisible.value = false
+}
+
+// ========================================
+// 图书详情抽屉（列表刷新、批量更新后返回查看结果一致）
+// ========================================
+const detailVisible = ref(false)
+const detailId = ref(null)
+const detailBook = computed(() =>
+  detailId.value === null ? null : bookStore.getBookById(detailId.value)
+)
+
+function showDetailDrawer(record) {
+  detailId.value = record.id
+  detailVisible.value = true
+}
+
 const columns = [
   { title: '图书信息', key: 'book', width: 280 },
   { title: '作者', dataIndex: 'author', key: 'author', width: 120 },
@@ -233,7 +560,7 @@ const columns = [
   { title: '价格', dataIndex: 'price', key: 'price', width: 80 },
   { title: '库存', key: 'stock', width: 80 },
   { title: '位置', dataIndex: 'location', key: 'location', width: 100 },
-  { title: '操作', key: 'action', width: 150, fixed: 'right' }
+  { title: '操作', key: 'action', width: 210, fixed: 'right' }
 ]
 
 const formState = reactive({
@@ -434,6 +761,10 @@ async function handleSubmit() {
 
 function handleDelete(id) {
   bookStore.deleteBook(id)
+  // 同步清理多选与批量待处理项，保证列表与结果对得上
+  selectedRowKeys.value = selectedRowKeys.value.filter(key => key !== id)
+  batchPendingIds.value = batchPendingIds.value.filter(key => key !== id)
+  batchResults.value = batchResults.value.filter(item => item.id !== id)
   message.success('图书删除成功')
 }
 </script>
@@ -616,7 +947,42 @@ function handleDelete(id) {
   .category-select {
     transition: all 0.3s ease;
   }
-  
+
+  .batch-btn {
+    transition: all 0.3s ease;
+
+    &:hover:not(:disabled) {
+      transform: translateY(-2px);
+      box-shadow: 0 4px 12px rgba(24, 144, 255, 0.25);
+    }
+  }
+
+  .batch-tip {
+    margin-top: 16px;
+    padding: 10px 16px;
+    background: #e6f7ff;
+    border: 1px solid #91d5ff;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+
+    .selected-count {
+      font-size: 13px;
+      color: #096dd9;
+
+      strong {
+        color: #1890ff;
+        font-size: 16px;
+        margin: 0 4px;
+      }
+    }
+
+    .clear-btn:hover {
+      color: #ff4d4f;
+    }
+  }
+
   .add-btn {
     transition: all 0.3s ease;
     
@@ -804,5 +1170,136 @@ function handleDelete(id) {
 .low-stock {
   color: #ff4d4f;
   font-weight: 500;
+}
+
+// ========================================
+// 批量维护弹窗
+// ========================================
+.batch-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 16px;
+  padding: 16px;
+  background: #fafafa;
+  border-radius: 8px;
+
+  :deep(.ant-form-item) {
+    margin-bottom: 0;
+  }
+
+  :deep(.ant-checkbox-wrapper) {
+    margin-right: 8px;
+  }
+}
+
+.batch-list-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  font-weight: 500;
+  color: #1a1a1a;
+  margin-bottom: 8px;
+
+  .batch-list-hint {
+    font-size: 12px;
+    font-weight: 400;
+    color: #fa8c16;
+  }
+}
+
+.batch-result {
+  margin-top: 16px;
+  border-top: 1px dashed #f0f0f0;
+  padding-top: 12px;
+
+  .batch-result-summary {
+    margin-bottom: 8px;
+
+    .batch-retry-hint {
+      margin-left: 8px;
+      font-size: 12px;
+      color: #ff4d4f;
+    }
+  }
+
+  .batch-result-list {
+    max-height: 200px;
+    overflow-y: auto;
+  }
+
+  .batch-result-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    font-size: 13px;
+    margin-bottom: 4px;
+
+    &.is-success {
+      background: #f6ffed;
+    }
+
+    &.is-fail {
+      background: #fff2f0;
+    }
+
+    .batch-result-icon {
+      font-size: 15px;
+    }
+
+    &.is-success .batch-result-icon {
+      color: #52c41a;
+    }
+
+    &.is-fail .batch-result-icon {
+      color: #ff4d4f;
+    }
+
+    .batch-result-title {
+      font-weight: 500;
+      color: #1a1a1a;
+      white-space: nowrap;
+      max-width: 220px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .batch-result-msg {
+      color: #666;
+    }
+
+    &.is-fail .batch-result-msg {
+      color: #ff4d4f;
+    }
+  }
+}
+
+// ========================================
+// 详情抽屉
+// ========================================
+.detail-cover {
+  text-align: center;
+  margin-bottom: 20px;
+
+  img {
+    width: 120px;
+    height: 160px;
+    object-fit: cover;
+    border-radius: 8px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  }
+}
+
+.detail-desc {
+  :deep(.ant-descriptions-item-label) {
+    width: 80px;
+  }
+}
+
+.table-action-btn.detail-btn:hover {
+  color: #722ed1;
+  background: #f9f0ff;
 }
 </style>
