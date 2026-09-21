@@ -43,9 +43,16 @@
           </a-select>
         </a-col>
         <a-col :xs="24" :sm="24" :md="8" :lg="12" style="text-align: right;">
-          <a-button type="primary" @click="showAddModal" class="add-btn">
-            <PlusOutlined /> 新增图书
-          </a-button>
+          <a-space>
+            <a-badge :count="pendingBatchCount" :offset="[-6, 4]">
+              <a-button @click="showBatchModal" class="batch-btn">
+                <EditOutlined /> 批量维护
+              </a-button>
+            </a-badge>
+            <a-button type="primary" @click="showAddModal" class="add-btn">
+              <PlusOutlined /> 新增图书
+            </a-button>
+          </a-space>
         </a-col>
       </a-row>
       
@@ -61,6 +68,34 @@
         </div>
       </transition>
     </div>
+
+    <a-alert
+      v-if="batchResultSummary"
+      class="batch-result-alert animate-fade-in"
+      :type="batchResultSummary.type"
+      show-icon
+      :message="batchResultSummary.message"
+      :description="batchResultSummary.description"
+    >
+      <template #action>
+        <a-space direction="vertical" size="4">
+          <a-button
+            v-if="pendingBatchCount > 0"
+            type="link"
+            size="small"
+            @click="locatePendingBooks"
+          >
+            定位待处理
+          </a-button>
+          <a-button type="link" size="small" @click="showBatchResultModal">
+            查看明细
+          </a-button>
+          <a-button type="link" size="small" danger @click="handleClearBatchResult">
+            清除结果
+          </a-button>
+        </a-space>
+      </template>
+    </a-alert>
 
     <!-- 图书表格 -->
     <div :class="['table-container', 'animate-fade-in', { 'table-loading': tableAnimating }]">
@@ -80,6 +115,7 @@
         :loading="loading"
         row-key="id"
         :pagination="{ pageSize: 10, showTotal: total => `共 ${total} 条` }"
+        :row-selection="rowSelection"
         :row-class-name="getRowClassName"
         @change="handleTableChange"
       >
@@ -107,7 +143,7 @@
                 <div 
                   class="stock-bar-fill" 
                   :style="{ 
-                    width: `${(record.available / record.total) * 100}%`,
+                    width: `${getStockPercent(record)}%`,
                     backgroundColor: record.available < 3 ? '#ff4d4f' : '#52c41a'
                   }"
                 ></div>
@@ -200,18 +236,143 @@
         </a-form-item>
       </a-form>
     </a-modal>
+
+    <!-- 批量维护弹窗 -->
+    <a-modal
+      v-model:open="batchModalVisible"
+      :title="batchModalTitle"
+      :confirm-loading="batchSubmitting"
+      :ok-text="batchModalOkText"
+      :cancel-text="viewingBatchResult ? '关闭' : '取消'"
+      width="860px"
+      @ok="handleBatchModalOk"
+    >
+      <template v-if="viewingBatchResult">
+        <a-alert
+          :type="batchResultSummary?.type || 'info'"
+          show-icon
+          :message="batchResultSummary?.message"
+          class="batch-detail-summary"
+        />
+        <a-table
+          class="batch-result-table"
+          :columns="batchResultColumns"
+          :data-source="displayBatchResults"
+          row-key="id"
+          size="small"
+          :pagination="false"
+        >
+          <template #bodyCell="{ column, record }">
+            <template v-if="column.key === 'book'">
+              <div class="batch-book-cell">
+                <div>{{ record.title }}</div>
+                <div class="batch-book-isbn">ISBN: {{ record.isbn }}</div>
+              </div>
+            </template>
+            <template v-else-if="column.key === 'status'">
+              <a-tag :color="record.status === 'success' ? 'success' : 'error'">
+                {{ record.status === 'success' ? '成功' : '失败' }}
+              </a-tag>
+            </template>
+            <template v-else-if="column.key === 'after'">
+              <span v-if="record.after">
+                {{ record.after.categoryName }} / {{ record.after.available }}-{{ record.after.total }} / {{ record.after.location }}
+              </span>
+              <span v-else class="text-secondary">--</span>
+            </template>
+            <template v-else-if="column.key === 'reason'">
+              <span :class="{ 'success-text': record.status === 'success', 'error-text': record.status === 'failed' }">
+                {{ record.reason }}
+              </span>
+            </template>
+          </template>
+        </a-table>
+      </template>
+
+      <template v-else>
+        <a-alert
+          v-if="batchSelectedBooks.length > 0"
+          class="batch-selection-alert"
+          type="info"
+          show-icon
+          :message="`本次处理 ${batchSelectedBooks.length} 本图书；其中 ${batchPendingSelectedCount} 本为待处理项`"
+          description="分类、库存总数和存放位置将统一应用到所选项。库存总数不能低于未归还册数。"
+        />
+
+        <a-form
+          ref="batchFormRef"
+          :model="batchForm"
+          :rules="batchRules"
+          :label-col="{ span: 5 }"
+          :wrapper-col="{ span: 18 }"
+        >
+          <a-form-item label="目标分类" name="categoryId">
+            <a-select v-model:value="batchForm.categoryId" placeholder="请选择分类">
+              <a-select-option
+                v-for="cat in categoryStore.categories"
+                :key="cat.id"
+                :value="cat.id"
+              >
+                {{ cat.name }}
+              </a-select-option>
+            </a-select>
+          </a-form-item>
+          <a-form-item label="库存总数" name="total">
+            <a-input-number
+              v-model:value="batchForm.total"
+              :min="0"
+              :precision="0"
+              style="width: 100%"
+              placeholder="请输入库存总数"
+            />
+          </a-form-item>
+          <a-form-item label="存放位置" name="location">
+            <a-input v-model:value="batchForm.location" placeholder="如：A区-01-03" />
+          </a-form-item>
+        </a-form>
+
+        <div class="batch-table-title">待处理图书</div>
+        <a-table
+          :columns="batchBookColumns"
+          :data-source="batchSelectedBooks"
+          row-key="id"
+          size="small"
+          :pagination="false"
+        >
+          <template #bodyCell="{ column, record }">
+            <template v-if="column.key === 'book'">
+              <div class="batch-book-cell">
+                <div>{{ record.title }}</div>
+                <div class="batch-book-isbn">ISBN: {{ record.isbn }}</div>
+              </div>
+            </template>
+            <template v-else-if="column.key === 'stock'">
+              {{ getAvailableCount(record) }} / {{ record.total }}
+              <span v-if="getBorrowedCount(record) > 0" class="borrowed-count">
+                （在借 {{ getBorrowedCount(record) }}）
+              </span>
+            </template>
+            <template v-else-if="column.key === 'location'">
+              {{ record.location }}
+            </template>
+          </template>
+        </a-table>
+      </template>
+    </a-modal>
   </div>
 </template>
 
 <script setup>
-import { ref, reactive, computed, nextTick, watch } from 'vue'
+import { ref, reactive, computed, nextTick } from 'vue'
 import { message } from 'ant-design-vue'
-import { PlusOutlined, EditOutlined, DeleteOutlined, SearchOutlined, EyeOutlined } from '@ant-design/icons-vue'
+import { PlusOutlined, EditOutlined, DeleteOutlined, SearchOutlined } from '@ant-design/icons-vue'
 import { useBookStore } from '@/stores/book'
 import { useCategoryStore } from '@/stores/category'
+import { useBorrowStore } from '@/stores/borrow'
 
 const bookStore = useBookStore()
 const categoryStore = useCategoryStore()
+const borrowStore = useBorrowStore()
 
 const loading = ref(false)
 const searchKeyword = ref('')
@@ -223,6 +384,16 @@ const editingId = ref(null)
 const formRef = ref(null)
 const isSearching = ref(false)
 const tableAnimating = ref(false)
+const selectedRowKeys = ref(bookStore.batchState.pendingIds)
+const batchModalVisible = ref(false)
+const batchSubmitting = ref(false)
+const viewingBatchResult = ref(false)
+const batchFormRef = ref(null)
+const batchForm = reactive({
+  categoryId: null,
+  total: null,
+  location: ''
+})
 let searchTimeout = null
 
 const columns = [
@@ -254,6 +425,25 @@ const rules = {
   categoryId: [{ required: true, message: '请选择分类' }]
 }
 
+const batchRules = {
+  categoryId: [{ required: true, message: '请选择目标分类' }],
+  total: [{ required: true, message: '请输入库存总数' }],
+  location: [{ whitespace: true, required: true, message: '请输入存放位置' }]
+}
+
+const batchBookColumns = [
+  { title: '图书', key: 'book' },
+  { title: '库存（可用/总）', key: 'stock', width: 180 },
+  { title: '当前位置', dataIndex: 'location', key: 'location', width: 160 }
+]
+
+const batchResultColumns = [
+  { title: '图书', key: 'book', width: 220 },
+  { title: '处理结果', key: 'status', width: 90 },
+  { title: '更新后信息', key: 'after' },
+  { title: '原因', key: 'reason', width: 260 }
+]
+
 const filteredBooks = computed(() => {
   let result = bookStore.books
 
@@ -272,6 +462,80 @@ const filteredBooks = computed(() => {
 
   return result
 })
+
+const batchSelectedBooks = computed(() =>
+  selectedRowKeys.value
+    .map(id => bookStore.getBookById(id))
+    .filter(Boolean)
+)
+
+const batchPendingSelectedCount = computed(() =>
+  batchSelectedBooks.value.filter(book =>
+    bookStore.batchState.pendingIds.includes(book.id)
+  ).length
+)
+
+const pendingBatchCount = computed(() =>
+  bookStore.batchState.pendingIds
+    .map(id => bookStore.getBookById(id))
+    .filter(Boolean).length
+)
+
+const displayBatchResults = computed(() => bookStore.batchState.results || [])
+
+const batchResultSummary = computed(() => {
+  const results = displayBatchResults.value
+  if (!results.length) return null
+
+  const successCount = results.filter(item => item.status === 'success').length
+  const failedCount = results.length - successCount
+  let type = 'success'
+  if (failedCount === results.length) type = 'error'
+  else if (failedCount > 0) type = 'warning'
+
+  const messageText = `批量维护完成：成功 ${successCount} 条，失败 ${failedCount} 条`
+  const description = failedCount > 0
+    ? `已保留 ${failedCount} 条待处理项，可调整库存或处理归还后重新提交。`
+    : '所选图书的分类、库存和存放位置均已同步更新。'
+
+  return { type, message: messageText, description }
+})
+
+const batchModalTitle = computed(() =>
+  viewingBatchResult.value ? '批量维护结果' : '批量维护图书'
+)
+
+const batchModalOkText = computed(() =>
+  viewingBatchResult.value ? '关闭' : '提交批量维护'
+)
+
+const rowSelection = computed(() => ({
+  selectedRowKeys: selectedRowKeys.value,
+  preserveSelectedRowKeys: true,
+  onChange: keys => {
+    selectedRowKeys.value = keys
+  }
+}))
+
+function getAvailableCount(book) {
+  return Number.isFinite(Number(book.available)) ? book.available : 0
+}
+
+function getBorrowedCount(book) {
+  const activeCount = borrowStore.records.filter(record =>
+    record.bookId === book.id &&
+    (record.status === 'borrowed' || record.status === 'overdue')
+  ).length
+  const inventoryCount = Number.isFinite(Number(book.total)) && Number.isFinite(Number(book.available))
+    ? Math.max(0, Number(book.total) - Number(book.available))
+    : 0
+  return Math.max(activeCount, inventoryCount)
+}
+
+function getStockPercent(book) {
+  if (!Number.isFinite(Number(book.total)) || Number(book.total) <= 0) return 0
+  return Math.min(100, Math.max(0, (getAvailableCount(book) / Number(book.total)) * 100))
+}
 
 function handleSearch() {
   triggerSearchAnimation()
@@ -314,7 +578,11 @@ function clearFilters() {
 
 // 获取行样式类名
 function getRowClassName(record, index) {
-  return `table-row-animate row-${index}`
+  return [
+    'table-row-animate',
+    `row-${index}`,
+    bookStore.batchState.pendingIds.includes(record.id) ? 'batch-pending-row' : ''
+  ].filter(Boolean).join(' ')
 }
 
 // 表格变化处理
@@ -368,6 +636,103 @@ function showEditModal(record) {
   nextTick(() => {
     formRef.value?.clearValidate()
   })
+}
+
+function showBatchModal() {
+  if (selectedRowKeys.value.length === 0) {
+    message.warning('请先勾选需要批量维护的图书')
+    return
+  }
+
+  viewingBatchResult.value = false
+  const lastPayload = bookStore.batchState.lastPayload
+  batchForm.categoryId = lastPayload?.categoryId ?? null
+  batchForm.total = lastPayload?.total ?? null
+  batchForm.location = lastPayload?.location ?? ''
+  batchModalVisible.value = true
+
+  nextTick(() => {
+    batchFormRef.value?.clearValidate()
+  })
+}
+
+function showBatchResultModal() {
+  if (displayBatchResults.value.length === 0) {
+    message.info('暂无批量维护结果')
+    return
+  }
+  viewingBatchResult.value = true
+  batchModalVisible.value = true
+}
+
+function locatePendingBooks() {
+  searchKeyword.value = ''
+  selectedCategory.value = null
+  selectedRowKeys.value = [...bookStore.batchState.pendingIds]
+  triggerSearchAnimation()
+  message.info('已定位待处理图书，请调整后重新提交')
+}
+
+function handleClearBatchResult() {
+  bookStore.clearBatchResults()
+  selectedRowKeys.value = []
+  message.success('批量维护结果已清除')
+}
+
+async function handleBatchSubmit() {
+  await batchFormRef.value.validate()
+
+  if (batchSubmitting.value || bookStore.batchSubmitting) {
+    message.warning('批量维护正在提交，请勿重复操作')
+    return
+  }
+
+  if (batchSelectedBooks.value.length === 0) {
+    message.warning('勾选的图书已不存在，请重新选择')
+    return
+  }
+
+  batchSubmitting.value = true
+  try {
+    const result = await bookStore.batchUpdateBooks(selectedRowKeys.value, { ...batchForm })
+
+    if (result.empty) {
+      message.warning('请先勾选需要批量维护的图书')
+      return
+    }
+    if (result.duplicate) {
+      message.warning('批量维护正在提交，请勿重复操作')
+      return
+    }
+
+    const failedCount = result.pendingIds.length
+    if (failedCount === 0) {
+      message.success(`批量维护完成，成功 ${result.results.length} 条`)
+      selectedRowKeys.value = []
+      batchModalVisible.value = false
+    } else {
+      const successCount = result.results.length - failedCount
+      message.warning(`成功 ${successCount} 条，失败 ${failedCount} 条，待处理项已保留`)
+      selectedRowKeys.value = [...result.pendingIds]
+      viewingBatchResult.value = true
+    }
+    triggerSearchAnimation()
+  } finally {
+    batchSubmitting.value = false
+  }
+}
+
+async function handleBatchModalOk() {
+  if (viewingBatchResult.value) {
+    batchModalVisible.value = false
+    return
+  }
+
+  try {
+    await handleBatchSubmit()
+  } catch (error) {
+    // 表单校验信息已由表单项展示
+  }
 }
 
 // 导入本地封面图片
@@ -716,6 +1081,10 @@ function handleDelete(id) {
   // 表格行样式
   :deep(.ant-table-tbody) {
     .ant-table-row {
+      &.batch-pending-row td {
+        background: #fff7e6 !important;
+      }
+
       &:hover td {
         background: #fafafa !important;
       }
@@ -804,5 +1173,60 @@ function handleDelete(id) {
 .low-stock {
   color: #ff4d4f;
   font-weight: 500;
+}
+
+.batch-btn {
+  transition: all 0.3s ease;
+
+  &:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(24, 144, 255, 0.25);
+  }
+}
+
+.batch-result-alert {
+  margin-bottom: 16px;
+  border-radius: 10px;
+}
+
+.batch-selection-alert,
+.batch-detail-summary {
+  margin-bottom: 16px;
+}
+
+.batch-table-title {
+  margin: 8px 0 12px;
+  font-weight: 500;
+  color: #1a1a1a;
+}
+
+.batch-result-table {
+  margin-top: 16px;
+}
+
+.batch-book-cell {
+  .batch-book-isbn {
+    margin-top: 2px;
+    font-size: 12px;
+    color: #999;
+  }
+}
+
+.borrowed-count,
+.text-secondary {
+  color: #fa8c16;
+  font-size: 12px;
+}
+
+.text-secondary {
+  color: #999;
+}
+
+.success-text {
+  color: #52c41a;
+}
+
+.error-text {
+  color: #ff4d4f;
 }
 </style>
